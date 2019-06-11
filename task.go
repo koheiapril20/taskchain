@@ -8,9 +8,11 @@ import (
 // Task is a tree-structured data proccessing task which propagates output data to all child nodes.
 type Task struct {
 	root    bool
+	started bool
 	head    *chan interface{}
 	tail    *chan interface{}
 	errChan *chan error
+	err     error
 	// used for stopping execution. only root's done channel is used
 	done     *chan struct{}
 	children *[]*Task
@@ -42,34 +44,37 @@ func (f *Task) runOp(in *<-chan interface{}, out *chan<- interface{}) {
 		}
 
 		if ok {
-			var doneChan <-chan struct{} = *done
-			f.op(&doneChan, in, out, errChan)
+			opDone := make(chan struct{})
+			go func(opDone chan struct{}) {
+				defer close(opDone)
+				var doneChan <-chan struct{} = *done
+				f.op(&doneChan, in, out, errChan)
+			}(opDone)
+			select {
+			case <-*done:
+				return
+			case <-opDone:
+				return
+			}
 		}
 	}(f.done, in, out, &errChan)
 }
 
 // Start makes the task ready to process data and returns i/o and error channels.
-func (f *Task) Start() (chan<- interface{}, <-chan interface{}, <-chan error, error) {
+func (f *Task) Start() (chan<- interface{}, <-chan interface{}, error) {
+	if !f.root {
+		return nil, nil, errors.New("child task node cannot execute Start()")
+	}
 	select {
 	case _, ok := <-*f.done:
 		if !ok {
-			return nil, nil, nil, errors.New("task already terminated")
+			return nil, nil, errors.New("task already terminated")
 		}
 	default:
 	}
 	ec := make(chan error)
 	f.errChan = &ec
-	if !f.root {
-		go func(ec chan error) {
-			ec <- errors.New("child task node cannot execute Run()")
-			close(ec)
-		}(ec)
-	} else {
-		f.run()
-	}
-
-	// error channel
-	var errChan <-chan error = *f.errChan
+	f.run()
 
 	// input channel
 	var input chan<- interface{} = *f.head
@@ -78,8 +83,18 @@ func (f *Task) Start() (chan<- interface{}, <-chan interface{}, <-chan error, er
 	var output <-chan interface{}
 	var done <-chan struct{} = *f.done
 	output = *f.merge(&done)
+	f.started = true
 
-	return input, output, errChan, nil
+	go func() {
+		select {
+		case f.err = <-*f.errChan:
+			f.Terminate()
+		case <-*f.done:
+			return
+		}
+	}()
+
+	return input, output, nil
 }
 
 func (f *Task) run() {
@@ -139,6 +154,9 @@ func (f *Task) Terminate() error {
 	if !f.root {
 		return errors.New("child task cannot use Terminate")
 	}
+	if !f.started {
+		return errors.New("task not started")
+	}
 	close(*f.done)
 	return nil
 }
@@ -147,6 +165,10 @@ func (f *Task) Terminate() error {
 func (f *Task) Done() <-chan struct{} {
 	var done <-chan struct{} = *f.done
 	return done
+}
+
+func (f *Task) Err() error {
+	return f.err
 }
 
 // New creates a new task with specified operation.
