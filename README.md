@@ -5,7 +5,7 @@ a async tree-structured task chain runner for golang
 ```
 func sample() {
 	// sample operation creator
-	multipleOp := func(in interface{}) (out interface{}, err error) {
+	multipleOp := func(m int) func(in interface{}) (interface{}, error) {
 		return func(in interface{}) (out interface{}, err error) {
 			out = in.(int) * m
 			return
